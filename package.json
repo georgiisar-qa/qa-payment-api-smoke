@@ -1,0 +1,13 @@
+{
+  "name": "qa-payment-api-smoke",
+  "version": "1.0.0",
+  "description": "P0 smoke suite for a payment (PSP) REST API — HMAC auth, idempotency, country rules, refund webhook signature",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "smoke": "playwright test tests/smoke.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0"
+  }
+}

@@ -1,0 +1,10 @@
+# secrets — never commit
+.env
+*.env
+!.env.example
+
+node_modules/
+test-results/
+playwright-report/
+*.log
+.DS_Store
