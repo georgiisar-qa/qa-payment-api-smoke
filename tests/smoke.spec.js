@@ -1,5 +1,5 @@
 // ============================================================
-// SMOKE S1–S12 — "is the payment platform alive?" (P0, < 2 min). One self-contained file.
+// SMOKE S1–S14 — "is the payment platform alive?" (P0, < 2 min). One self-contained file.
 //   S1  POST /payments valid            -> 200 + payment_id
 //   S2  Same Idempotency-Key twice       -> 200 + 422 (in-progress)
 //   S3  No Idempotency-Key twice         -> 2 distinct payment_id
@@ -12,6 +12,8 @@
 //   S10 Refund                           -> 200 + webhook with a VALID signature
 //   S11 GET /health on every service     -> 200
 //   S12 Payout happy-path                -> 200 (or insufficient_balance)
+//   S13 Wrong X-Signature (security)     -> 401/403 (HMAC is actually verified)
+//   S14 Hosted checkout: no-card payin   -> 200 + processing_url; checkout page loads
 //
 // No dependency on any shared lib. Credentials come from .env (see .env.example).
 // No secrets in code. Run: npx playwright test tests/smoke.spec.js
@@ -229,4 +231,31 @@ test('S12: payout happy-path -> 200 (or insufficient_balance)', async () => {
   const noBal = res.status() === 422 && (/insufficient\s*balance/i.test(err?.description || '') || err?.kind === 'insufficient_balance');
   console.log(`S12: HTTP=${res.status()} ${funded ? 'funded' : noBal ? 'path ok, no balance' : `🔴 ${err?.kind}`}`);
   expect(funded || noBal, `payout broken: ${rawText.slice(0, 200)}`).toBeTruthy();
+});
+
+// ── S13 (security) ──
+// S4 checks a signature is REQUIRED; S13 checks the HMAC is actually VERIFIED —
+// a request signed with the wrong secret (valid Bearer) must be rejected.
+test('S13: wrong X-Signature -> 401/403 (signature is actually verified)', async () => {
+  const api = await newApi({ bearer: need('SMOKE_PAYIN_A_BEARER'), apiSecret: 'tampered-wrong-secret' });
+  const res = await api.post('/api/v1/payments', payinBody({ amountMajor: 1000, currency: PAYIN_CCY }));
+  const body = await jr(res); await api.dispose();
+  console.log(`S13: HTTP=${res.status()} err=${body?.errors?.[0]?.kind || '—'}`);
+  expect([401, 403], `a wrong signature must be rejected, got ${res.status()}`).toContain(res.status());
+});
+
+// ── S14: hosted checkout — payin WITHOUT a card -> 200 + processing_url; the page loads ──
+test('S14: no-card payin -> checkout URL + checkout page responds < 400', async () => {
+  const api = await payinApi();
+  const res = await api.post('/api/v1/payments', payinBody({ amountMajor: 1000, currency: PAYIN_CCY, card: null }));
+  const body = await jr(res); await api.dispose();
+  const url = body?.processing_url;
+  console.log(`S14: HTTP=${res.status()} processing_url=${url ? 'yes' : '—'}`);
+  expect(res.status(), 'no-card payin').toBe(200);
+  expect(url, 'no processing_url — nowhere to redirect the customer to pay').toBeTruthy();
+  expect(String(url), 'processing_url must be an absolute URL').toMatch(/^https?:\/\//);
+  const ctx = await apiRequest.newContext();
+  const page = await ctx.get(url); const code = page.status(); await ctx.dispose();
+  console.log(`S14: checkout GET=${code}`);
+  expect(code, 'checkout page did not load').toBeLessThan(400);
 });
