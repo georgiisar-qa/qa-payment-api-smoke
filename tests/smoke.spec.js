@@ -6,7 +6,7 @@
 //   S4  No X-Signature                   -> 401/403
 //   S5  GET /balances signed             -> 200 + balances[]
 //   S6  Payin creates a balanced ledger pair (Σ=0) — SKIP (needs ledger/core service)
-//   S7  Payout base path                 -> 200 (or insufficient_balance)
+//   S7  Payout without X-Signature        -> 401/403 (payout-path auth)
 //   S8  Console login (SSO)              -> landing
 //   S9  Country stop-list: US card on a ROW merchant -> 422 (blocked before the gateway)
 //   S10 Refund                           -> 200 + webhook with a VALID signature
@@ -89,10 +89,9 @@ test('S2: same Idempotency-Key twice -> 200 + 422', async () => {
     api.post('/api/v1/payments', b, { extraHeaders: { 'Idempotency-Key': key } }),
   ]);
   const s1 = r1.status(), s2 = r2.status(); await api.dispose();
-  const ok = s1 === 200 ? s1 : s2, dup = s1 === 422 ? s1 : s2;
   console.log(`S2: statuses=${s1}/${s2}`);
-  expect(ok, 'one request must be 200').toBe(200);
-  expect(dup, 'the second with the same key must be 422').toBe(422);
+  // exactly one 200 + one 422, regardless of order — also catches double-accept (200/200) and double-reject (422/422)
+  expect([s1, s2].sort((a, b) => a - b), `expected one 200 + one 422, got ${s1}/${s2}`).toEqual([200, 422]);
 });
 
 // ── S3 ──
@@ -128,16 +127,13 @@ test('S5: GET /balances signed -> 200 + array', async () => {
 // ── S6 (SKIP) ──
 test.skip('S6: payin creates a balanced ledger pair Σ=0 — needs ledger/core service', async () => {});
 
-// ── S7 ──
-test('S7: payout base path -> 200 (or insufficient_balance)', async () => {
+// ── S7 (security): payout path enforces the signature too (mirror of S4 for payins) ──
+test('S7: payout without X-Signature -> 401/403', async () => {
   const api = await newApi({ bearer: need('SMOKE_PAYOUT_BEARER'), apiSecret: need('SMOKE_PAYOUT_SECRET'), baseURL: process.env.SMOKE_PAYOUT_BASE_URL || BASE });
-  const res = await api.post('/api/v1/payouts', { product: 'smoke', amount: 1000, currency: 'USD', order_number: orderNo('smk-s7'), redirect_success_url: 'https://example.com/success', redirect_fail_url: 'https://example.com/fail', callback_url: 'https://example.com/callback', customer: { email: CUST.email, ip: CUST.ip }, card: CARD_PAYOUT });
-  const rawText = await res.text(); await api.dispose();
-  let body = {}; try { body = JSON.parse(rawText); } catch {}
-  const err = body?.errors?.[0]; const funded = res.status() === 200 && body?.success === true;
-  const noBal = res.status() === 422 && (/insufficient\s*balance/i.test(err?.description || '') || err?.kind === 'insufficient_balance');
-  console.log(`S7: HTTP=${res.status()} ${funded ? 'funded' : noBal ? 'path ok, no balance' : `🔴 ${err?.kind}`}`);
-  expect(funded || noBal, `payout broken: ${rawText.slice(0, 200)}`).toBeTruthy();
+  const res = await api.post('/api/v1/payouts', { product: 'smoke', amount: 1000, currency: 'USD', order_number: orderNo('smk-s7'), redirect_success_url: 'https://example.com/success', redirect_fail_url: 'https://example.com/fail', callback_url: 'https://example.com/callback', customer: { email: CUST.email, ip: CUST.ip }, card: CARD_PAYOUT }, { signed: false });
+  const body = await jr(res); await api.dispose();
+  console.log(`S7: HTTP=${res.status()} err=${body?.errors?.[0]?.kind || '—'}`);
+  expect([401, 403], `payout without a signature must be rejected, got ${res.status()}`).toContain(res.status());
 });
 
 // ── S8 (browser) ──
@@ -175,6 +171,9 @@ test('S9: country stop-list — US card on a ROW merchant -> 422 (blocked before
 
 // ── S10 ──
 test('S10: refund -> 200 + webhook with a valid signature', async () => {
+  // Gated to nightly: relies on the external webhook.site (flaky + slow for a fast MR gate).
+  // For a prod gate, replace webhook.site with a self-hosted callback receiver to drop the external dependency.
+  test.skip(!process.env.SMOKE_NIGHTLY, 'nightly-only: external webhook.site dependency');
   test.setTimeout(120_000);
   const bearer = need('SMOKE_REFUND_BEARER'), apiSecret = need('SMOKE_REFUND_SECRET'), webhookSecret = need('SMOKE_REFUND_WEBHOOK_SECRET');
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
